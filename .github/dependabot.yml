@@ -1,0 +1,7 @@
+# Keeps the SHA-pinned actions in workflows up to date (opens PRs, never auto-merges).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
