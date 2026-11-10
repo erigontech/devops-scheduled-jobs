@@ -1,0 +1,88 @@
+# Periodic routines. Add a new routine as a job and list it in notify-failure.needs.
+name: Notifications
+
+on:
+  schedule:
+    - cron: "23 * * * *" # hourly; GitHub may delay or drop scheduled runs under load
+    - cron: "41 6 * * 1" # weekly keepalive (rss runs too, harmless)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print instead of posting notification"
+        type: boolean
+        default: false
+      reseed:
+        description: "Mark all current entries as seen without posting"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: routines
+  cancel-in-progress: false
+
+jobs:
+  rss:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: state
+          key: rss-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: rss-state-
+
+      - name: Post new entries
+        env:
+          RSS_FEEDS: ${{ vars.RSS_FEEDS }}
+          RSS_EXCLUDE: ${{ vars.RSS_EXCLUDE }}
+          NOTIFICATION_WEBHOOK: ${{ secrets.INFRA_RELEASES_NOTIFICATION }}
+          STATE_FILE: state/rss.json
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          RESEED: ${{ inputs.reseed || 'false' }}
+        run: python3 scripts/remote_rss_to_local_notification.py
+
+      - name: Save state
+        if: always() && !inputs.dry_run
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: state
+          key: rss-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # Scheduled workflows in public repos are disabled after 60 days without repo activity.
+  # Re-enabling via the API once a week keeps the schedule alive (same approach as keepalive-workflow).
+  keepalive:
+    if: github.event.schedule == '41 6 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/routines.yml/enable"
+
+  notify-failure:
+    needs: [rss, keepalive]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post failure notification
+        env:
+          WEBHOOK: ${{ secrets.INFRA_ALERTS_NOTIFICATION }}
+          NEEDS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          failed=$(jq -r 'to_entries | map(select(.value.result == "failure") | .key) | join(", ")' <<<"$NEEDS")
+          jq -n --arg c "❌ **${GITHUB_WORKFLOW}** failed: ${failed:-unknown} — <${RUN_URL}>" \
+            '{content: $c, allowed_mentions: {parse: []}}' |
+            curl -fsS -o /dev/null -H 'Content-Type: application/json' --data-binary @- "$WEBHOOK"
