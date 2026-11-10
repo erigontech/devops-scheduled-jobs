@@ -1,5 +1,9 @@
 # Periodic routines. Add a new routine as a job and list it in notify-failure.needs.
 name: Notifications
+# Expressions have no clock, so the run title shows the trigger; the run list shows the start time.
+run-name: >-
+  ${{ github.workflow }} ·
+  ${{ github.event_name == 'schedule' && 'scheduled' || format('manual by {0}', github.actor) }}${{ inputs.post_latest && ' · post latest' || '' }}${{ inputs.dry_run && ' · dry run' || '' }}${{ inputs.reseed && ' · reseed' || '' }}
 
 on:
   schedule:
@@ -15,6 +19,10 @@ on:
         description: "Mark all current entries as seen without posting"
         type: boolean
         default: false
+      post_latest:
+        description: "Also post the latest entry of every feed (checks feeds and webhook)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,6 +34,7 @@ concurrency:
 jobs:
   rss:
     runs-on: ubuntu-latest
+    environment: notifications # secrets only for runs from main (environment branch rule)
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,8 +45,11 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: state
-          key: rss-state-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: rss-state-
+          key: ${{ github.workflow }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # rss-state-: pre-rename key, remove once a new-style cache exists
+          restore-keys: |
+            ${{ github.workflow }}-${{ github.job }}-
+            rss-state-
 
       - name: Post new entries
         env:
@@ -47,6 +59,7 @@ jobs:
           STATE_FILE: state/rss.json
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           RESEED: ${{ inputs.reseed || 'false' }}
+          POST_LATEST: ${{ inputs.post_latest || 'false' }}
         run: python3 scripts/remote_rss_to_local_notification.py
 
       - name: Save state
@@ -54,7 +67,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: state
-          key: rss-state-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ github.workflow }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # Scheduled workflows in public repos are disabled after 60 days without repo activity.
   # Re-enabling via the API once a week keeps the schedule alive (same approach as keepalive-workflow).
@@ -74,6 +87,7 @@ jobs:
     needs: [rss, keepalive]
     if: failure()
     runs-on: ubuntu-latest
+    environment: notifications
     timeout-minutes: 5
     steps:
       - name: Post failure notification
